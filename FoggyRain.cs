@@ -125,10 +125,7 @@ namespace FoggyRain
                         forms.Add(new BlankForm(b));
                         continue;
                     }
-                    Bitmap shot = new Bitmap(b.Width, b.Height, PixelFormat.Format32bppRgb);
-                    using (Graphics g = Graphics.FromImage(shot))
-                        g.CopyFromScreen(b.Left, b.Top, 0, 0, b.Size, CopyPixelOperation.SourceCopy);
-                    forms.Add(new SaverForm(b, shot, seed++));
+                    forms.Add(new SaverForm(b, Background.For(b), seed++));
                 }
 
                 ApplicationContext ctx = new ApplicationContext();
@@ -157,7 +154,7 @@ namespace FoggyRain
     // =====================================================================================
     //  Settings: definitions, presets, registry storage
     // =====================================================================================
-    enum Kind { Slider, Check, Color, Choice }
+    enum Kind { Slider, Check, Color, Choice, File }
 
     class Def
     {
@@ -166,6 +163,7 @@ namespace FoggyRain
         public float Min, Max, Default;
         public int Decimals;
         public string[] Choices;
+        public string DefaultText = "";
     }
 
     static class Settings
@@ -173,6 +171,7 @@ namespace FoggyRain
         public static List<Def> Defs = new List<Def>();
         static Dictionary<string, Def> byKey = new Dictionary<string, Def>();
         static Dictionary<string, float> values = new Dictionary<string, float>();
+        static Dictionary<string, string> texts = new Dictionary<string, string>();
         public static List<string> PresetNames = new List<string>();
         static Dictionary<string, object[]> presets = new Dictionary<string, object[]>();
         const string RegPath = @"Software\FoggyRain";
@@ -204,6 +203,10 @@ namespace FoggyRain
             Def d = Add(Kind.Choice, tab, key, label, 0, choices.Length - 1, def, 0, "", hint);
             d.Choices = choices;
             return d;
+        }
+        static Def FileSetting(string tab, string key, string label, string hint)
+        {
+            return Add(Kind.File, tab, key, label, 0, 0, 0, 0, "", hint);
         }
         static void Preset(string name, params object[] kv)
         {
@@ -297,6 +300,17 @@ namespace FoggyRain
             Slider("Lightning", "lightStrength", "Flash brightness", 5, 100, 60, 0, "%",
                 "How bright the flashes are.");
 
+            // ---------- Background ----------
+            Choice("Background", "bgMode", "Show behind the glass", 0,
+                new string[] {
+                    "Frozen screen (wallpaper if it can't be captured)",
+                    "Frozen screen (picture below if it can't be captured)",
+                    "Always the desktop wallpaper",
+                    "Always the picture below" },
+                "When Windows starts the screen saver itself it can hide your desktop, so a stand-in is used.");
+            FileSetting("Background", "bgPicture", "Picture",
+                "Any JPG, PNG or BMP. It is scaled to fill each monitor.");
+
             // ---------- General ----------
             Slider("General", "fps", "Frame rate", 10, 60, 30, 0, "fps",
                 "Smoother at higher values but uses more of your PC. 30 is plenty.");
@@ -346,6 +360,15 @@ namespace FoggyRain
         }
 
         public static bool On(string key) { return Get(key) >= 0.5f; }
+
+        public static string GetText(string key)
+        {
+            string v;
+            if (texts.TryGetValue(key, out v)) return v;
+            return byKey[key].DefaultText;
+        }
+
+        public static void SetText(string key, string v) { texts[key] = v ?? ""; }
         public static int Rgb(string key) { return ((int)Get(key)) & 0xFFFFFF; }
 
         public static void Set(string key, float v)
@@ -372,6 +395,7 @@ namespace FoggyRain
         public static void ResetDefaults()
         {
             values.Clear();
+            texts.Clear();
         }
 
         public static void ApplyPreset(string name)
@@ -379,7 +403,7 @@ namespace FoggyRain
             object[] kv;
             if (!presets.TryGetValue(name, out kv)) return;
             foreach (Def d in Defs)
-                if (d.Tab != "General") values[d.Key] = d.Default;
+                if (d.Tab != "General" && d.Tab != "Background" && d.Kind != Kind.File) values[d.Key] = d.Default;
             for (int i = 0; i + 1 < kv.Length; i += 2)
                 Set((string)kv[i], Convert.ToSingle(kv[i + 1], CultureInfo.InvariantCulture));
         }
@@ -395,6 +419,7 @@ namespace FoggyRain
                     {
                         object o = k.GetValue(d.Key);
                         if (o == null) continue;
+                        if (d.Kind == Kind.File) { SetText(d.Key, o.ToString()); continue; }
                         float v;
                         if (float.TryParse(o.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out v))
                             Set(d.Key, v);
@@ -411,7 +436,10 @@ namespace FoggyRain
                 using (RegistryKey k = Registry.CurrentUser.CreateSubKey(RegPath))
                 {
                     foreach (Def d in Defs)
-                        k.SetValue(d.Key, Get(d.Key).ToString("R", CultureInfo.InvariantCulture));
+                    {
+                        if (d.Kind == Kind.File) k.SetValue(d.Key, GetText(d.Key));
+                        else k.SetValue(d.Key, Get(d.Key).ToString("R", CultureInfo.InvariantCulture));
+                    }
                 }
             }
             catch (Exception ex)
@@ -647,12 +675,47 @@ namespace FoggyRain
                         }
                     };
                 }
+                else if (d.Kind == Kind.File)
+                {
+                    TextBox tx = new TextBox();
+                    tx.Location = new Point(220, y + 3);
+                    tx.Width = 260;
+                    tx.ReadOnly = true;
+                    p.Controls.Add(tx);
+                    Button browse = new Button();
+                    browse.Text = "Browse...";
+                    browse.Location = new Point(486, y + 1);
+                    browse.Size = new Size(70, 26);
+                    p.Controls.Add(browse);
+                    Button clr = new Button();
+                    clr.Text = "Clear";
+                    clr.Location = new Point(560, y + 1);
+                    clr.Size = new Size(48, 26);
+                    p.Controls.Add(clr);
+                    refreshers.Add(delegate { tx.Text = Settings.GetText(def.Key); });
+                    browse.Click += delegate
+                    {
+                        using (OpenFileDialog ofd = new OpenFileDialog())
+                        {
+                            ofd.Title = "Choose a picture";
+                            ofd.Filter = "Pictures|*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.tif;*.tiff|All files|*.*";
+                            string cur = Settings.GetText(def.Key);
+                            try { if (cur.Length > 0) ofd.InitialDirectory = Path.GetDirectoryName(cur); } catch { }
+                            if (ofd.ShowDialog(this) == DialogResult.OK)
+                            {
+                                Settings.SetText(def.Key, ofd.FileName);
+                                tx.Text = ofd.FileName;
+                            }
+                        }
+                    };
+                    clr.Click += delegate { Settings.SetText(def.Key, ""); tx.Text = ""; };
+                }
                 else if (d.Kind == Kind.Choice)
                 {
                     ComboBox box = new ComboBox();
                     box.DropDownStyle = ComboBoxStyle.DropDownList;
                     box.Location = new Point(220, y + 2);
-                    box.Width = 330;
+                    box.Width = 380;
                     foreach (string c in d.Choices) box.Items.Add(c);
                     p.Controls.Add(box);
                     refreshers.Add(delegate
@@ -677,6 +740,124 @@ namespace FoggyRain
             p.Controls.Add(hint);
 
             return y + 58;
+        }
+    }
+
+    // =====================================================================================
+    //  Background: the frozen screen, or a stand-in picture when Windows hides the desktop
+    // =====================================================================================
+    static class Background
+    {
+        // Returns a bitmap exactly the size of this monitor.
+        public static Bitmap For(Rectangle b)
+        {
+            int mode = (int)Settings.Get("bgMode");
+            string picture = Settings.GetText("bgPicture");
+
+            if (mode == 2) return Stand(b, WallpaperPath(), "wallpaper");
+            if (mode == 3) return Stand(b, picture, "picture");
+
+            Bitmap shot = new Bitmap(b.Width, b.Height, PixelFormat.Format32bppRgb);
+            try
+            {
+                using (Graphics g = Graphics.FromImage(shot))
+                    g.CopyFromScreen(b.Left, b.Top, 0, 0, b.Size, CopyPixelOperation.SourceCopy);
+            }
+            catch (Exception ex)
+            {
+                Program.Log("  screen capture failed: " + ex.Message);
+            }
+            if (!LooksBlack(shot))
+            {
+                Program.Log("  using the frozen screen for " + b);
+                return shot;
+            }
+
+            // Windows ran us on its separate screen-saver desktop, where the real desktop can't be seen.
+            Program.Log("  screen capture came back black for " + b + " - using a stand-in");
+            string first = mode == 1 ? picture : WallpaperPath();
+            string second = mode == 1 ? WallpaperPath() : picture;
+            Bitmap alt = Load(b, first);
+            if (alt == null) alt = Load(b, second);
+            if (alt == null) { Program.Log("  no stand-in picture could be loaded"); return shot; }
+            shot.Dispose();
+            return alt;
+        }
+
+        static Bitmap Stand(Rectangle b, string path, string what)
+        {
+            Bitmap bmp = Load(b, path);
+            if (bmp != null) return bmp;
+            Program.Log("  could not load the " + what + " (" + path + "), using black");
+            return new Bitmap(b.Width, b.Height, PixelFormat.Format32bppRgb);
+        }
+
+        // True when almost every sampled pixel is black.
+        static bool LooksBlack(Bitmap bmp)
+        {
+            int lit = 0, total = 0;
+            int stepX = Math.Max(1, bmp.Width / 96), stepY = Math.Max(1, bmp.Height / 54);
+            BitmapData d = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
+            try
+            {
+                int[] row = new int[bmp.Width];
+                for (int y = stepY / 2; y < bmp.Height; y += stepY)
+                {
+                    Marshal.Copy(d.Scan0 + y * d.Stride, row, 0, bmp.Width);
+                    for (int x = stepX / 2; x < bmp.Width; x += stepX)
+                    {
+                        int c = row[x];
+                        if (((c >> 16) & 255) + ((c >> 8) & 255) + (c & 255) > 30) lit++;
+                        total++;
+                    }
+                }
+            }
+            finally { bmp.UnlockBits(d); }
+            return lit < Math.Max(1, total / 200);
+        }
+
+        public static string WallpaperPath()
+        {
+            string p = null;
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop"))
+                    if (k != null) p = k.GetValue("WallPaper") as string;
+            }
+            catch { }
+            if (string.IsNullOrEmpty(p) || !File.Exists(p))
+                p = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                                 @"Microsoft\Windows\Themes\TranscodedWallpaper");
+            return p;
+        }
+
+        // Loads a picture scaled to cover the monitor (cropping the overflow), or null.
+        static Bitmap Load(Rectangle b, string path)
+        {
+            if (string.IsNullOrEmpty(path) || !File.Exists(path)) return null;
+            try
+            {
+                using (Image img = Image.FromFile(path))
+                {
+                    Bitmap dst = new Bitmap(b.Width, b.Height, PixelFormat.Format32bppRgb);
+                    float scale = Math.Max((float)b.Width / img.Width, (float)b.Height / img.Height);
+                    float w = img.Width * scale, h = img.Height * scale;
+                    using (Graphics g = Graphics.FromImage(dst))
+                    {
+                        g.Clear(Color.Black);
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        g.DrawImage(img, (b.Width - w) / 2f, (b.Height - h) / 2f, w, h);
+                    }
+                    Program.Log("  using picture " + path + " for " + b);
+                    return dst;
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.Log("  could not load " + path + ": " + ex.Message);
+                return null;
+            }
         }
     }
 

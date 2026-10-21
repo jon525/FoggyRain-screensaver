@@ -31,6 +31,7 @@ Right-click `FoggyRain.scr` and choose **Configure**, or click **Settings…** i
 | **Condensation** | Bead formation rate, maximum beads, bead size |
 | **Drops** | Lens magnification, highlight brightness, edge darkness, bottom glow, running drop stretch |
 | **Lightning** | On/off, time between flashes, flash brightness |
+| **Background** | What shows behind the glass: the frozen screen, your desktop wallpaper or a picture you choose |
 | **General** | Frame rate, render resolution, CPU cores, which monitors, exiting on mouse movement and how far, hiding the pointer, diagnostic log |
 
 Presets: Default, Light drizzle, Heavy downpour, Storm, Thick fog, Night window, Calm and slow, Windy, Quick demo.
@@ -51,6 +52,6 @@ Replace `FoggyRain.cs` and run `build.bat` again. You don't need to reinstall.
 
 - **Slow or stuttering:** on the General tab, lower **Render resolution** or **Frame rate**.
 - **Small preview picture is blank:** that's normal; use the **Preview** button instead.
-- **Frozen screen is black after the lock screen:** untick *On resume, display logon screen*.
+- **The screen goes black when Windows starts the screen saver (but Test works):** Windows runs screen savers on a separate, protected desktop where your real screen can't be seen. Foggy Rain notices this and uses your desktop wallpaper instead. You can also pick a picture of your own on the **Background** tab.
 - **`build.bat` can't find `csc.exe`:** turn on *.NET Framework 4.8 Advanced Services* under *Turn Windows features on or off*.
 - **Anything else:** run it once and check `FoggyRain.log` next to the `.scr`.

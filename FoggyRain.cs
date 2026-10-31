@@ -68,6 +68,14 @@ namespace FoggyRain
             }
         }
 
+        // Per-monitor DPI awareness so each screen's bounds are its real pixels.
+        public static void SetDpiAware()
+        {
+            bool dpiSet = false;
+            try { dpiSet = SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
+            if (!dpiSet) try { SetProcessDPIAware(); } catch { }
+        }
+
         [STAThread]
         static void Main(string[] args)
         {
@@ -80,10 +88,24 @@ namespace FoggyRain
             {
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
+                if (Settings.On("helper")) Helper.Ensure(false);
                 Application.Run(new SettingsForm());
                 return;
             }
-            if (mode == "/p") return; // no live preview in the little monitor picture
+            if (mode == "/p")
+            {
+                // Windows asks for a preview whenever the Screen Saver Settings window opens:
+                // a good moment to make sure the snapshot helper is running.
+                if (Settings.On("helper")) Helper.Ensure(false);
+                return;
+            }
+            if (mode == "/w")
+            {
+                SetDpiAware();
+                if (Settings.On("log")) SetUpLog();
+                Helper.Run();
+                return;
+            }
 
             if (Settings.On("log")) SetUpLog();
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
@@ -100,10 +122,7 @@ namespace FoggyRain
             // Keep the rest of the PC responsive while we run.
             try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
 
-            // Per-monitor DPI awareness so each screen's bounds are its real pixels.
-            bool dpiSet = false;
-            try { dpiSet = SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
-            if (!dpiSet) try { SetProcessDPIAware(); } catch { }
+            SetDpiAware();
 
             Log("Start  args='" + string.Join(" ", args) + "'  OS=" + Environment.OSVersion +
                 "  64-bit=" + Environment.Is64BitProcess + "  cores=" + Environment.ProcessorCount);
@@ -307,9 +326,11 @@ namespace FoggyRain
                     "Frozen screen (picture below if it can't be captured)",
                     "Always the desktop wallpaper",
                     "Always the picture below" },
-                "When Windows starts the screen saver itself it can hide your desktop, so a stand-in is used.");
+                "Windows hides your desktop from screen savers, so the helper below snapshots it just beforehand.");
             FileSetting("Background", "bgPicture", "Picture",
                 "Any JPG, PNG or BMP. It is scaled to fill each monitor.");
+            Check("Background", "helper", "Snapshot my screen just before the screen saver starts", true,
+                "Runs a tiny helper with Windows so the rain falls on your screen exactly as you left it.");
 
             // ---------- General ----------
             Slider("General", "fps", "Frame rate", 10, 60, 30, 0, "fps",
@@ -528,7 +549,7 @@ namespace FoggyRain
             test.Click += delegate { RunTest(); };
 
             Button ok = MakeButton("OK", 428, 610, 100);
-            ok.Click += delegate { Settings.Save(); Close(); };
+            ok.Click += delegate { Settings.Save(); Helper.Apply(); Close(); };
 
             Button cancel = MakeButton("Cancel", 538, 610, 110);
             cancel.Click += delegate { Close(); };
@@ -757,6 +778,28 @@ namespace FoggyRain
             if (mode == 2) return Stand(b, WallpaperPath(), "wallpaper");
             if (mode == 3) return Stand(b, picture, "picture");
 
+            // Best option: the snapshot the helper took of the real desktop a few seconds ago.
+            string snap = Helper.SnapshotPath(b);
+            try
+            {
+                if (File.Exists(snap))
+                {
+                    double age = (DateTime.UtcNow - File.GetLastWriteTimeUtc(snap)).TotalSeconds;
+                    if (age >= 0 && age < 90)
+                    {
+                        Bitmap s = Load(b, snap);
+                        if (s != null)
+                        {
+                            Program.Log("  using the helper's snapshot (" + age.ToString("0") + "s old) for " + b);
+                            return s;
+                        }
+                    }
+                    else Program.Log("  helper snapshot is " + age.ToString("0") + "s old - too old to use");
+                }
+                else Program.Log("  no helper snapshot for " + b);
+            }
+            catch { }
+
             Bitmap shot = new Bitmap(b.Width, b.Height, PixelFormat.Format32bppRgb);
             try
             {
@@ -813,7 +856,8 @@ namespace FoggyRain
                 }
             }
             finally { bmp.UnlockBits(d); }
-            return lit < Math.Max(1, total / 200);
+            Program.Log("  live capture: " + (100.0 * lit / Math.Max(1, total)).ToString("0.0") + "% of the screen is not black");
+            return lit < Math.Max(1, total / 20);
         }
 
         public static string WallpaperPath()
@@ -857,6 +901,185 @@ namespace FoggyRain
             {
                 Program.Log("  could not load " + path + ": " + ex.Message);
                 return null;
+            }
+        }
+    }
+
+    // =====================================================================================
+    //  Helper: runs in the background (FoggyRain.scr /watch, started with Windows) and
+    //  snapshots every monitor a few seconds before the screen saver is due. Windows runs
+    //  screen savers on a separate desktop where the real screen can't be captured.
+    // =====================================================================================
+    static class Helper
+    {
+        const string MutexName = @"Local\FoggyRainHelper";
+        const string QuitName = @"Local\FoggyRainHelperQuit";
+        const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        const string RunValue = "FoggyRainHelper";
+        const double LeadSeconds = 4;
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+        [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+        [DllImport("user32.dll")] static extern bool SystemParametersInfo(uint action, uint param, ref int pvParam, uint winIni);
+        const uint SPI_GETSCREENSAVETIMEOUT = 0x000E;
+        const uint SPI_GETSCREENSAVEACTIVE = 0x0010;
+
+        public static string SnapshotDir
+        {
+            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FoggyRain"); }
+        }
+
+        public static string SnapshotPath(Rectangle b)
+        {
+            return Path.Combine(SnapshotDir, "snapshot_" + b.X + "_" + b.Y + "_" + b.Width + "_" + b.Height + ".png");
+        }
+
+        static bool IsRunning()
+        {
+            System.Threading.Mutex m;
+            if (System.Threading.Mutex.TryOpenExisting(MutexName, out m)) { m.Dispose(); return true; }
+            return false;
+        }
+
+        // Called when settings are saved.
+        public static void Apply()
+        {
+            if (Settings.On("helper")) Ensure(true);
+            else Disable();
+        }
+
+        public static void Ensure(bool restart)
+        {
+            try
+            {
+                if (IsRunning())
+                {
+                    if (!restart) return;
+                    Signal();
+                    for (int i = 0; i < 30 && IsRunning(); i++) System.Threading.Thread.Sleep(100);
+                }
+                Process.Start(Application.ExecutablePath, "/watch");
+            }
+            catch { }
+        }
+
+        public static void Disable()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKey, true))
+                    if (k != null) k.DeleteValue(RunValue, false);
+            }
+            catch { }
+            Signal();
+        }
+
+        static void Signal()
+        {
+            try
+            {
+                using (System.Threading.EventWaitHandle e = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.AutoReset, QuitName))
+                    e.Set();
+            }
+            catch { }
+        }
+
+        public static void Run()
+        {
+            if (!Settings.On("helper")) { Disable(); return; }
+            bool created;
+            System.Threading.Mutex mutex = new System.Threading.Mutex(true, MutexName, out created);
+            if (!created) { mutex.Dispose(); return; }
+            try
+            {
+                // Start with Windows from now on.
+                try
+                {
+                    using (RegistryKey k = Registry.CurrentUser.CreateSubKey(RunKey))
+                        k.SetValue(RunValue, "\"" + Application.ExecutablePath + "\" /watch");
+                }
+                catch { }
+                try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
+                Program.Log("Helper started (" + Application.ExecutablePath + ")");
+
+                using (System.Threading.EventWaitHandle quit = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.AutoReset, QuitName))
+                {
+                    quit.Reset();
+                    bool taken = false;
+                    while (!quit.WaitOne(1000))
+                    {
+                        int timeout = ScreenSaverTimeout();
+                        if (timeout <= 0) { taken = false; continue; }
+                        double idle = IdleSeconds();
+                        if (idle >= timeout - LeadSeconds)
+                        {
+                            if (!taken) { taken = true; Capture(); }
+                        }
+                        else taken = false;
+                    }
+                }
+                Program.Log("Helper stopped");
+            }
+            finally
+            {
+                try { mutex.ReleaseMutex(); } catch { }
+                mutex.Dispose();
+            }
+        }
+
+        // Seconds until Windows starts the screen saver, or 0 if Foggy Rain isn't the active one.
+        static int ScreenSaverTimeout()
+        {
+            try
+            {
+                int active = 0;
+                SystemParametersInfo(SPI_GETSCREENSAVEACTIVE, 0, ref active, 0);
+                if (active == 0) return 0;
+                string scr = null;
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop"))
+                    if (k != null) scr = k.GetValue("SCRNSAVE.EXE") as string;
+                // Windows sometimes stores the short 8.3 name (FOGGYR~1.SCR), so match the start only.
+                if (scr == null || Path.GetFileName(scr).IndexOf("foggyr", StringComparison.OrdinalIgnoreCase) < 0) return 0;
+                int t = 0;
+                SystemParametersInfo(SPI_GETSCREENSAVETIMEOUT, 0, ref t, 0);
+                return t;
+            }
+            catch { return 0; }
+        }
+
+        static double IdleSeconds()
+        {
+            LASTINPUTINFO li = new LASTINPUTINFO();
+            li.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+            if (!GetLastInputInfo(ref li)) return 0;
+            return unchecked((uint)Environment.TickCount - li.dwTime) / 1000.0;
+        }
+
+        static void Capture()
+        {
+            try
+            {
+                Directory.CreateDirectory(SnapshotDir);
+                foreach (Screen sc in Screen.AllScreens)
+                {
+                    Rectangle b = sc.Bounds;
+                    using (Bitmap bmp = new Bitmap(b.Width, b.Height, PixelFormat.Format32bppRgb))
+                    {
+                        using (Graphics g = Graphics.FromImage(bmp))
+                            g.CopyFromScreen(b.Left, b.Top, 0, 0, b.Size, CopyPixelOperation.SourceCopy);
+                        string path = SnapshotPath(b);
+                        string tmp = path + ".tmp";
+                        bmp.Save(tmp, ImageFormat.Png);
+                        if (File.Exists(path)) File.Delete(path);
+                        File.Move(tmp, path);
+                    }
+                }
+                Program.Log("Helper: snapshot taken");
+            }
+            catch (Exception ex)
+            {
+                Program.Log("Helper: snapshot failed: " + ex.Message);
             }
         }
     }

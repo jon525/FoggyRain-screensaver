@@ -7,14 +7,17 @@ if not exist "%CSC%" set "CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.ex
 if not exist "%CSC%" goto nocsc
 
 rem Stop the background snapshot helper so FoggyRain.scr can be replaced.
+taskkill /f /im FoggyRainHelper.exe >nul 2>&1
 taskkill /f /im FoggyRain.scr >nul 2>&1
-if not errorlevel 1 timeout /t 1 /nobreak >nul
+timeout /t 1 /nobreak >nul
 
 "%CSC%" /nologo /target:winexe /optimize+ /unsafe /out:FoggyRain.scr /r:System.Windows.Forms.dll /r:System.Drawing.dll FoggyRain.cs
 if errorlevel 1 goto failed
 
-rem Start the snapshot helper (it exits straight away if it's turned off in the settings).
-start "" "%~dp0FoggyRain.scr" /watch
+rem Start the snapshot helper from an .exe copy (it exits straight away if it's turned off in the settings).
+if not exist "%LOCALAPPDATA%\FoggyRain" mkdir "%LOCALAPPDATA%\FoggyRain"
+copy /y "%~dp0FoggyRain.scr" "%LOCALAPPDATA%\FoggyRain\FoggyRainHelper.exe" >nul
+start "" "%LOCALAPPDATA%\FoggyRain\FoggyRainHelper.exe" /watch
 
 echo.
 echo Built FoggyRain.scr

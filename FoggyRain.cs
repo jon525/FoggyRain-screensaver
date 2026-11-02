@@ -76,6 +76,19 @@ namespace FoggyRain
             if (!dpiSet) try { SetProcessDPIAware(); } catch { }
         }
 
+        // The helper keeps its own log next to the snapshots, so it survives the main log being trimmed.
+        static void SetUpHelperLog()
+        {
+            try
+            {
+                Directory.CreateDirectory(Helper.SnapshotDir);
+                string p = Path.Combine(Helper.SnapshotDir, "helper.log");
+                if (File.Exists(p) && new FileInfo(p).Length > 500000) File.Delete(p);
+                LogPath = p;
+            }
+            catch { }
+        }
+
         [STAThread]
         static void Main(string[] args)
         {
@@ -102,8 +115,8 @@ namespace FoggyRain
             if (mode == "/w")
             {
                 SetDpiAware();
-                if (Settings.On("log")) SetUpLog();
-                Helper.Run();
+                if (Settings.On("log")) SetUpHelperLog();
+                Helper.Run(args[0].Trim().ToLowerInvariant());
                 return;
             }
 
@@ -836,9 +849,12 @@ namespace FoggyRain
         }
 
         // True when almost every sampled pixel is black.
+        // True when the capture is black or one flat colour - what Windows hands a screen saver
+        // running on its separate desktop.
         static bool LooksBlack(Bitmap bmp)
         {
             int lit = 0, total = 0;
+            double sum = 0, sum2 = 0;
             int stepX = Math.Max(1, bmp.Width / 96), stepY = Math.Max(1, bmp.Height / 54);
             BitmapData d = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
             try
@@ -851,13 +867,41 @@ namespace FoggyRain
                     {
                         int c = row[x];
                         if (((c >> 16) & 255) + ((c >> 8) & 255) + (c & 255) > 30) lit++;
+                        int l = (((c >> 16) & 255) * 3 + ((c >> 8) & 255) * 6 + (c & 255)) / 10;
+                        sum += l;
+                        sum2 += l * l;
                         total++;
                     }
                 }
             }
             finally { bmp.UnlockBits(d); }
-            Program.Log("  live capture: " + (100.0 * lit / Math.Max(1, total)).ToString("0.0") + "% of the screen is not black");
-            return lit < Math.Max(1, total / 20);
+            double n = Math.Max(1, total);
+            double mean = sum / n;
+            double sd = Math.Sqrt(Math.Max(0, sum2 / n - mean * mean));
+            Program.Log("  live capture: " + (100.0 * lit / n).ToString("0.0") + "% not black, brightness " +
+                        mean.ToString("0.0") + ", variation " + sd.ToString("0.0"));
+            SaveDiagnostic(bmp);
+            return lit < total / 20 || sd < 4;
+        }
+
+        // Keeps a small copy of the last live capture so problems can be looked at later.
+        static void SaveDiagnostic(Bitmap bmp)
+        {
+            try
+            {
+                Directory.CreateDirectory(Helper.SnapshotDir);
+                int w = Math.Min(960, bmp.Width), h = Math.Max(1, bmp.Height * w / bmp.Width);
+                using (Bitmap small = new Bitmap(w, h, PixelFormat.Format24bppRgb))
+                {
+                    using (Graphics g = Graphics.FromImage(small))
+                    {
+                        g.InterpolationMode = InterpolationMode.Bilinear;
+                        g.DrawImage(bmp, 0, 0, w, h);
+                    }
+                    small.Save(Path.Combine(Helper.SnapshotDir, "last-live-capture_" + bmp.Width + "x" + bmp.Height + ".jpg"), ImageFormat.Jpeg);
+                }
+            }
+            catch { }
         }
 
         public static string WallpaperPath()
@@ -930,6 +974,41 @@ namespace FoggyRain
             get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FoggyRain"); }
         }
 
+        // The helper runs from an .exe copy: Windows opens .scr files as screen savers ("/S"),
+        // which can swallow the /watch argument when started from the Run key.
+        public static string HelperExe
+        {
+            get { return Path.Combine(SnapshotDir, "FoggyRainHelper.exe"); }
+        }
+
+        static bool SamePath(string a, string b)
+        {
+            try { return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase); }
+            catch { return false; }
+        }
+
+        // Copies this program to the helper .exe (when it isn't running) and starts it.
+        static void Launch()
+        {
+            string self = Application.ExecutablePath;
+            string exe = HelperExe;
+            string arg = "/watch";
+            try
+            {
+                Directory.CreateDirectory(SnapshotDir);
+                if (!SamePath(self, exe)) File.Copy(self, exe, true);
+            }
+            catch (Exception ex)
+            {
+                Program.Log("Helper: could not copy to " + exe + ": " + ex.Message);
+                if (!File.Exists(exe)) { exe = self; arg = "/wx"; } // run the loop from here instead
+            }
+            ProcessStartInfo psi = new ProcessStartInfo(exe, arg);
+            psi.UseShellExecute = false;
+            psi.WorkingDirectory = Path.GetDirectoryName(exe);
+            Process.Start(psi);
+        }
+
         public static string SnapshotPath(Rectangle b)
         {
             return Path.Combine(SnapshotDir, "snapshot_" + b.X + "_" + b.Y + "_" + b.Width + "_" + b.Height + ".png");
@@ -959,9 +1038,9 @@ namespace FoggyRain
                     Signal();
                     for (int i = 0; i < 30 && IsRunning(); i++) System.Threading.Thread.Sleep(100);
                 }
-                Process.Start(Application.ExecutablePath, "/watch");
+                Launch();
             }
-            catch { }
+            catch (Exception ex) { Program.Log("Helper: could not start: " + ex.Message); }
         }
 
         public static void Disable()
@@ -985,9 +1064,18 @@ namespace FoggyRain
             catch { }
         }
 
-        public static void Run()
+        public static void Run(string arg)
         {
             if (!Settings.On("helper")) { Disable(); return; }
+
+            // Started from the .scr (build.bat or an older startup entry): hand over to the .exe copy.
+            if (!SamePath(Application.ExecutablePath, HelperExe) && !arg.StartsWith("/wx"))
+            {
+                try { if (!IsRunning()) Launch(); }
+                catch (Exception ex) { Program.Log("Helper: could not start: " + ex.Message); }
+                return;
+            }
+
             bool created;
             System.Threading.Mutex mutex = new System.Threading.Mutex(true, MutexName, out created);
             if (!created) { mutex.Dispose(); return; }
@@ -997,19 +1085,31 @@ namespace FoggyRain
                 try
                 {
                     using (RegistryKey k = Registry.CurrentUser.CreateSubKey(RunKey))
-                        k.SetValue(RunValue, "\"" + Application.ExecutablePath + "\" /watch");
+                        k.SetValue(RunValue, "\"" + Application.ExecutablePath + "\" " + arg);
                 }
                 catch { }
                 try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
-                Program.Log("Helper started (" + Application.ExecutablePath + ")");
+                Program.Log("Helper started (" + Application.ExecutablePath + ")  screen saver timeout=" + ScreenSaverTimeout() + "s");
 
                 using (System.Threading.EventWaitHandle quit = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.AutoReset, QuitName))
                 {
                     quit.Reset();
                     bool taken = false;
+                    int lastTimeout = -1;
+                    DateTime nextBeat = DateTime.Now.AddHours(1);
                     while (!quit.WaitOne(1000))
                     {
                         int timeout = ScreenSaverTimeout();
+                        if (timeout != lastTimeout)
+                        {
+                            Program.Log("Helper: " + (timeout > 0 ? "screen saver due after " + timeout + "s idle" : "Foggy Rain isn't the active screen saver - waiting"));
+                            lastTimeout = timeout;
+                        }
+                        if (DateTime.Now >= nextBeat)
+                        {
+                            Program.Log("Helper: still running");
+                            nextBeat = DateTime.Now.AddHours(1);
+                        }
                         if (timeout <= 0) { taken = false; continue; }
                         double idle = IdleSeconds();
                         if (idle >= timeout - LeadSeconds)

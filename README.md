@@ -46,7 +46,7 @@ Replace `FoggyRain.cs` and run `build.bat` again. You don't need to reinstall.
 
 1. In the Foggy Rain settings, untick **Snapshot my screen just before the screen saver starts** on the Background tab and click **OK**. This stops the helper and removes it from startup.
 2. In Screen Saver Settings, pick another screen saver or **(None)**.
-3. Delete the folder, and `%LOCALAPPDATA%\FoggyRain` (the snapshots).
+3. Delete the folder, and `%LOCALAPPDATA%\FoggyRain` (the helper, its log and the snapshots).
 4. Optional: delete `HKEY_CURRENT_USER\Software\FoggyRain` in regedit.
 
 ## Troubleshooting
@@ -55,4 +55,4 @@ Replace `FoggyRain.cs` and run `build.bat` again. You don't need to reinstall.
 - **Small preview picture is blank:** that's normal; use the **Preview** button instead.
 - **The screen goes black when Windows starts the screen saver (but Test works):** Windows runs screen savers on a separate desktop where your real screen can't be seen. Foggy Rain gets around this with a tiny helper that starts with Windows and snapshots your screen about 4 seconds before the screen saver is due. The helper starts the first time you run `build.bat`, open the settings or open Windows' Screen Saver Settings. You can turn it off on the **Background** tab; then your wallpaper or a picture you choose is used instead.
 - **`build.bat` can't find `csc.exe`:** turn on *.NET Framework 4.8 Advanced Services* under *Turn Windows features on or off*.
-- **Anything else:** run it once and check `FoggyRain.log` next to the `.scr`.
+- **Anything else:** run it once and check `FoggyRain.log` next to the `.scr`. The snapshot helper keeps its own log in `%LOCALAPPDATA%\FoggyRain\helper.log`.
